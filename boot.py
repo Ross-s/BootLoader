@@ -364,11 +364,12 @@ class SDManager:
             self.mounted = False
 
 
-global enable_network, network_mode, network_ssid, network_password, sd_manager
+global enable_network, network_mode, network_ssid, network_password, ip_address
 enable_network = False
 network_mode = 0
 network_ssid = ""
 network_password = ""
+ip_address = ""
 
 
 def do_connect(ssid, password):
@@ -381,6 +382,7 @@ def do_connect(ssid, password):
         while not wlan.isconnected():
             machine.idle()
     print(wlan.ifconfig()[0])
+    ip_address = wlan.ifconfig()[0]
 
 
 def do_create_ap(ssid, password):
@@ -389,6 +391,7 @@ def do_create_ap(ssid, password):
     ap.active(True)
     ap.config(essid=ssid, password=password)
     print(ap.ifconfig()[0])
+    ip_address = ap.ifconfig()[0]
 
 
 if __name__ == "__main__":
