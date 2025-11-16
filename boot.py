@@ -1,6 +1,6 @@
 from machine import Pin, SPI
 from micropython import const
-import time, os
+import time, os, asyncio
 
 
 _CMD_TIMEOUT = const(100)
@@ -293,7 +293,6 @@ class SDManager:
         mosi_pin=3,
         miso_pin=4,
         cs_pin=5,
-        power_pin=16,
         mount_path="/sd",
     ):
         self.SPI_BUS = spi_bus
@@ -301,7 +300,6 @@ class SDManager:
         self.MOSI_PIN = mosi_pin
         self.MISO_PIN = miso_pin
         self.CS_PIN = cs_pin
-        self.POWER_PIN = power_pin
         self.SD_MOUNT_PATH = mount_path
 
         self.spi = None
@@ -309,24 +307,7 @@ class SDManager:
         self.sd = None
         self.mounted = False
 
-    def reinitialize_sd(self):
-        power_pin = Pin(self.POWER_PIN, Pin.OUT)
-        power_pin.value(0)  # Turn OFF SD card
-        print("SD card power OFF")
-
-        # Also release all SPI pins while power is off
-        try:
-            Pin(self.SCK_PIN, Pin.IN)
-            Pin(self.MOSI_PIN, Pin.IN)
-            Pin(self.MISO_PIN, Pin.IN)
-            Pin(self.CS_PIN, Pin.IN)
-        except:
-            pass
-        time.sleep_ms(500)  # Wait for complete power down and capacitor discharge
-        power_pin.value(1)  # Turn ON SD card
-        print("SD card power ON")
-        time.sleep_ms(500)  # Wait for SD card to fully power up and stabilize
-
+    async def init(self):
         try:
             os.umount(self.SD_MOUNT_PATH)
         except:
@@ -335,7 +316,7 @@ class SDManager:
         try:
             # Init CS pin high (deselected)
             self.cs = Pin(self.CS_PIN, Pin.OUT, value=1)
-            time.sleep_ms(50)
+            await asyncio.sleep_ms(50)
 
             # Init SPI communication at very low speed for initialization
             self.spi = SPI(
@@ -347,12 +328,12 @@ class SDManager:
                 mosi=Pin(self.MOSI_PIN),
                 miso=Pin(self.MISO_PIN),
             )
-            time.sleep_ms(50)
+            await asyncio.sleep_ms(50)
 
             # Send more dummy clocks to ensure card is ready (>74 clocks required by SD spec)
             for _ in range(20):
                 self.spi.write(b"\xff")
-            time.sleep_ms(50)
+            await asyncio.sleep_ms(50)
 
             # Initialize SD card
             self.sd = SDCard(self.spi, self.cs, baudrate=1000000)
@@ -364,15 +345,25 @@ class SDManager:
             self.mounted = False
 
 
-global enable_network, network_mode, network_ssid, network_password, ip_address
-enable_network = False
+global network_enabled, network_mode, network_ssid, network_password, ip_address, led, boot_finished
+network_enabled = False
 network_mode = 0
 network_ssid = ""
 network_password = ""
 ip_address = ""
+boot_finished = False
+led = Pin("LED", Pin.OUT)
 
 
-def do_connect(ssid, password):
+async def blink_led():
+    """Blink LED while boot_finished is False"""
+    while not boot_finished:
+        led.value(not led.value())
+        await asyncio.sleep_ms(500)
+    led.value(0)  # Keep LED ON after boot
+
+
+async def do_connect(ssid, password):
     import machine, network
     wlan = network.WLAN()
     wlan.active(True)
@@ -380,23 +371,26 @@ def do_connect(ssid, password):
         print('connecting to network...')
         wlan.connect(ssid, password)
         while not wlan.isconnected():
-            machine.idle()
+            await asyncio.sleep_ms(100)
     print(wlan.ifconfig()[0])
-    ip_address = wlan.ifconfig()[0]
+    return wlan.ifconfig()[0]
 
 
-def do_create_ap(ssid, password):
+async def do_create_ap(ssid, password):
     import network
     ap = network.WLAN(network.AP_IF)
     ap.active(True)
     ap.config(essid=ssid, password=password)
     print(ap.ifconfig()[0])
-    ip_address = ap.ifconfig()[0]
+    return ap.ifconfig()[0]
 
 
-if __name__ == "__main__":
+async def boot_sequence():
+    """Main boot sequence"""
+    global boot_finished, ip_address
+    
     sd_manager = SDManager()
-    sd_manager.reinitialize_sd()
+    await sd_manager.init()
 
     if sd_manager.mounted:
         # Check if boot.py exists on SD card and execute it
@@ -411,11 +405,26 @@ if __name__ == "__main__":
         except Exception as e:
             print("Error executing SD card boot.py:", e)
 
-    if enable_network:
+    if network_enabled:
         print("Network Enabled")
         if network_mode == 1:
             print("Mode: Station")
-            do_connect(network_ssid, network_password)
+            ip_address = await do_connect(network_ssid, network_password)
         elif network_mode == 0:
             print("Mode: Access Point")
-            do_create_ap(network_ssid, network_password)
+            ip_address = await do_create_ap(network_ssid, network_password)
+        print("IP Address:", ip_address)
+    
+    boot_finished = True
+
+
+async def main():
+    """Run boot sequence and LED blinking concurrently"""
+    await asyncio.gather(
+        blink_led(),
+        boot_sequence()
+    )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
